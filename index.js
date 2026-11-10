@@ -1,11 +1,18 @@
 /**
- * 逐句朗读 (Auto TTS) — 第三方扩展 v1.1
+ * 逐句朗读 (Auto TTS) — 第三方扩展 v1.2
  *
- * v1.1 改动：
- *  - 消息容器自动探测：优先 #chat .mes，找不到就退到全页 .mes_text，再不行扫全页
- *  - MutationObserver：任何聊天区变动（新消息 / 重渲染 / 切聊天）都会自动重扫
- *  - 幂等注入：有按钮就跳过，被重写了就补回来，不会重复加
- *  - 设置面板新增「诊断」按钮：点一下弹窗告诉你扫描到了什么
+ * v1.2 关键改动：
+ *  - 注入方式从「逐文本节点」改为「整块 HTML 替换」：
+ *    酒馆/其他扩展常把 【角色名】 包进 <font>/<span> 上色，导致角色名和台词
+ *    被拆进不同文本节点，旧版永远凑不齐正则。现在允许中间隔着标签，台词内部
+ *    被标签打断也能接上。
+ *  - 按钮改为扫描后统一绑定事件（innerHTML 重建会杀掉内联绑定）。
+ *
+ * v1.1 改动保留：
+ *  - 容器自动探测（#chat .mes → 全页 .mes_text → 全页 .mes）
+ *  - MutationObserver 聊天区盯梢，变动后 300ms 自动重扫
+ *  - 幂等：有按钮就跳过，被重写就补
+ *  - 「诊断」按钮
  */
 
 import { extension_settings } from '../../../extensions.js';
@@ -30,12 +37,20 @@ const DEFAULT_SETTINGS = {
 /* 台词识别                                                            */
 /* ------------------------------------------------------------------ */
 
-// 组1：【角色】   组2：角色：   组3：台词
-const DIALOGUE_SOURCE =
-    '(?:【([^】\\n]{1,16})】|([\\u4e00-\\u9fa5A-Za-z·]{1,8})[：:])\\s*[「“]([^」”\\n]{1,600})[」”]';
+/*
+ * HTML 级匹配：角色名与台词之间允许出现任意标签（上色 span/font 等），
+ * 台词内部也允许被标签打断。
+ *   组1：【角色】      组2：角色：      组3：台词（可能含标签）
+ */
+const LINE_HTML_SOURCE =
+    '(?:【([^】\\n]{1,16})】|([\\u4e00-\\u9fa5A-Za-z·]{1,8})[：:])' +
+    '\\s*(?:<[^>]+>\\s*)*' +
+    '[「“]((?:[^」”\\n]|<[^>]+>){1,600})[」”]';
 
-// 用于"有没有台词"的快速检测（不带 g 标志，避免 lastIndex 陷阱）
-const DIALOGUE_TEST = new RegExp(DIALOGUE_SOURCE);
+// 纯文本快速预检用（有没有台词）
+const DIALOGUE_TEST = new RegExp(
+    '(?:【[^】\\n]{1,16}】|[\\u4e00-\\u9fa5A-Za-z·]{1,8}[：:])\\s*[「“][^」”\\n]{1,600}[」”]'
+);
 
 /* ------------------------------------------------------------------ */
 /* 状态                                                               */
@@ -48,7 +63,7 @@ let currentUtter = null;
 let lastStats = null;
 
 /* ------------------------------------------------------------------ */
-/* 设置读写                                                            */
+/* 设置                                                               */
 /* ------------------------------------------------------------------ */
 
 function loadSettings() {
@@ -65,7 +80,7 @@ function persist() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 音色解析                                                            */
+/* 音色                                                               */
 /* ------------------------------------------------------------------ */
 
 function resolveVoice(charName) {
@@ -217,62 +232,36 @@ function notify(kind, msg) {
 }
 
 /* ------------------------------------------------------------------ */
-/* DOM 注入                                                           */
+/* HTML 工具                                                          */
 /* ------------------------------------------------------------------ */
 
-function makeButton(charName, line) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'sttts-btn';
-    btn.title = '朗读：' + charName;
-    btn.textContent = '▶';
-    btn.dataset.char = charName;
-    btn.dataset.text = line;
-    btn.addEventListener('click', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        playText(btn);
-    });
-    return btn;
+function escapeAttr(s) {
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
 }
 
-/** 把一个文本节点里的台词切开、行尾塞按钮。返回插入数量。 */
-function splitTextNode(node) {
-    const raw = node.nodeValue;
-    if (!raw || !raw.trim()) return 0;
-
-    const re = new RegExp(DIALOGUE_SOURCE, 'g');
-    let match;
-    let last = 0;
-    let frag = null;
-    let count = 0;
-
-    while ((match = re.exec(raw)) !== null) {
-        const charName = (match[1] || match[2] || '').trim();
-        const line = (match[3] || '').trim();
-        if (!charName || !line) continue;
-
-        const end = match.index + match[0].length;
-        if (!frag) frag = document.createDocumentFragment();
-
-        if (match.index > last) {
-            frag.appendChild(document.createTextNode(raw.slice(last, match.index)));
-        }
-        frag.appendChild(document.createTextNode(match[0]));
-        frag.appendChild(makeButton(charName, line));
-        last = end;
-        count++;
-    }
-
-    if (!frag) return 0;
-    if (last < raw.length) {
-        frag.appendChild(document.createTextNode(raw.slice(last)));
-    }
-    node.parentNode.replaceChild(frag, node);
-    return count;
+function stripTags(s) {
+    return String(s)
+        .replace(/<[^>]*>/g, '')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'");
 }
 
-/** 找出该消息元素里应该扫的正文的根节点 */
+function buildBtnHtml(charName, line) {
+    return `<button type="button" class="sttts-btn" title="朗读：${escapeAttr(charName)}" `
+        + `data-char="${escapeAttr(charName)}" data-text="${escapeAttr(line)}">▶</button>`;
+}
+
+/* ------------------------------------------------------------------ */
+/* 注入（HTML 级，幂等）                                               */
+/* ------------------------------------------------------------------ */
+
 function textRootOf(el) {
     if (!el) return null;
     if (el.classList && el.classList.contains('mes_text')) return el;
@@ -280,47 +269,50 @@ function textRootOf(el) {
     return inner || el;
 }
 
-/**
- * 幂等注入：有按钮就跳过；没按钮但有台词就注入。
- * 目标元素可以是 .mes（整条消息）或 .mes_text 本身。
- */
 function decorateMessage(el) {
     if (!settings.enabled || !el) return 0;
 
     const root = textRootOf(el);
-    if (!root) return 0;
+    if (!root || !root.innerHTML) return 0;
 
-    // 已有按钮就不动（被外部重写后按钮会消失，这里会自动补）
+    // 已有按钮就跳过（被外部重写后按钮消失，这里会自动补）
     if (root.querySelector('.sttts-btn')) return 0;
 
-    // 快速预检：整块文本里到底有没有台词
-    const whole = root.textContent || '';
-    if (!whole.trim() || !DIALOGUE_TEST.test(whole)) return 0;
+    const html = root.innerHTML;
+    if (html.length > 400000) return 0; // 超长文本保护
 
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-        acceptNode(n) {
-            if (!n.nodeValue || !n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
-            const p = n.parentElement;
-            if (!p) return NodeFilter.FILTER_REJECT;
-            if (p.closest('button, script, style, code, pre, .sttts-btn')) {
-                return NodeFilter.FILTER_REJECT;
-            }
-            return NodeFilter.FILTER_ACCEPT;
-        },
+    const plain = stripTags(html);
+    if (!plain.trim() || !DIALOGUE_TEST.test(plain)) return 0;
+
+    const re = new RegExp(LINE_HTML_SOURCE, 'g');
+    let count = 0;
+
+    const out = html.replace(re, (m, c1, c2, inner) => {
+        const charName = (c1 || c2 || '').trim();
+        const line = stripTags(inner).trim();
+        if (!charName || !line) return m;
+        count++;
+        return m + buildBtnHtml(charName, line);
     });
 
-    const nodes = [];
-    while (walker.nextNode()) nodes.push(walker.currentNode);
+    if (!count) return 0;
 
-    let total = 0;
-    for (const n of nodes) {
-        try {
-            total += splitTextNode(n);
-        } catch (e) {
-            console.warn(TAG, '跳过节点', e);
-        }
-    }
-    return total;
+    root.innerHTML = out;
+    bindButtons(root);
+    return count;
+}
+
+/** 给 root 下所有未绑定的按钮挂事件 */
+function bindButtons(root) {
+    root.querySelectorAll('.sttts-btn').forEach(btn => {
+        if (btn.dataset.stttsBound === '1') return;
+        btn.dataset.stttsBound = '1';
+        btn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            playText(btn);
+        });
+    });
 }
 
 /** 消息元素列表：优先 #chat .mes，退到全页 .mes_text，再退到全页 .mes */
@@ -363,7 +355,7 @@ function scheduleRescan() {
     rescanTimer = setTimeout(scanAll, 300);
 }
 
-/** 盯住整个文档的聊天区变动 */
+/** 盯住聊天区变动 */
 function installObserver() {
     const chat = document.getElementById('chat');
     if (!chat) {
@@ -390,7 +382,9 @@ function runDiagnostics() {
     const mesAll = document.querySelectorAll('.mes');
     const mesTextAll = document.querySelectorAll('.mes_text');
 
-    const re = new RegExp(DIALOGUE_SOURCE);
+    const re = new RegExp(
+        '(?:【[^】\\n]{1,16}】|[\\u4e00-\\u9fa5A-Za-z·]{1,8}[：:])\\s*(?:<[^>]+>\\s*)*[「“][^」”\\n]{1,600}[」”]'
+    );
     let hitBlocks = 0;
     let firstMatch = '';
     document.querySelectorAll('.mes_text, .mes').forEach(el => {
@@ -406,7 +400,7 @@ function runDiagnostics() {
     const firstTextEl = document.querySelector('.mes_text');
     const firstText = firstTextEl
         ? (firstTextEl.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 100)
-        : '（页面上根本没有 .mes_text 元素）';
+        : '（页面上没有 .mes_text 元素）';
 
     const lines = [
         '【st-auto-tts 诊断】',
@@ -422,7 +416,7 @@ function runDiagnostics() {
         '第一条消息正文开头:',
         firstText,
         '',
-        '扩展已加载: 是',
+        '扩展版本: v1.2（HTML 级匹配）',
     ];
     alert(lines.join('\n'));
 }
@@ -592,7 +586,6 @@ function bindEvents() {
 jQuery(async () => {
     loadSettings();
 
-    // 面板可能比扩展加载得晚，轮询直到塞进去为止
     let tries = 0;
     const tryBuild = () => {
         if (buildSettingsUI()) return;
@@ -601,13 +594,10 @@ jQuery(async () => {
     tryBuild();
 
     bindEvents();
-
-    // 聊天容器晚于扩展出现时，installObserver 自己会等
     installObserver();
 
-    // 双保险：几秒后再扫一次（防止事件都没触发的情况）
     setTimeout(scanAll, 2000);
     setTimeout(scanAll, 6000);
 
-    console.log(TAG, 'loaded');
+    console.log(TAG, 'loaded v1.2');
 });
