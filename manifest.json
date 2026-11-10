@@ -1,0 +1,11 @@
+{
+  "display_name": "逐句朗读 (Auto TTS)",
+  "loading_order": 50,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "workspace",
+  "version": "1.0.0",
+  "homePage": ""
+}

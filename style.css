@@ -1,0 +1,67 @@
+/* 逐句朗读 (Auto TTS) — 行内小喇叭按钮 */
+
+.sttts-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    margin: 0 3px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: rgba(140, 140, 140, 0.22);
+    color: inherit;
+    font-size: 9px;
+    line-height: 1;
+    vertical-align: middle;
+    cursor: pointer;
+    opacity: 0.5;
+    transition: opacity 0.15s, background 0.15s, transform 0.15s;
+    flex: 0 0 auto;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.sttts-btn:hover {
+    opacity: 1;
+    background: rgba(140, 140, 140, 0.4);
+    transform: scale(1.12);
+}
+
+.sttts-btn:active {
+    transform: scale(0.94);
+}
+
+.sttts-btn.sttts-playing {
+    opacity: 1;
+    background: #4a9eff;
+    color: #fff;
+    animation: sttts-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes sttts-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(74, 158, 255, 0.55); }
+    50%      { box-shadow: 0 0 0 5px rgba(74, 158, 255, 0); }
+}
+
+/* 设置面板里的小排版 */
+.sttts-settings label {
+    display: block;
+    margin: 8px 0 3px;
+    font-size: 0.9em;
+    opacity: 0.85;
+}
+
+.sttts-settings input[type="text"],
+.sttts-settings input[type="password"],
+.sttts-settings textarea {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.sttts-settings textarea {
+    resize: vertical;
+    font-family: monospace;
+    font-size: 0.9em;
+}
